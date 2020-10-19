@@ -20,6 +20,7 @@ package it.cnr.si.cool.jconon.spid.service;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.org.apache.xerces.internal.parsers.DOMParser;
 import it.cnr.cool.cmis.service.CMISService;
+import it.cnr.cool.exception.CoolUserFactoryException;
 import it.cnr.cool.security.service.UserService;
 import it.cnr.cool.security.service.impl.alfresco.CMISUser;
 import it.cnr.cool.service.I18nService;
@@ -79,6 +80,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.ApplicationContext;
 import org.springframework.core.env.Environment;
 import org.springframework.core.io.Resource;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.w3c.dom.Element;
 import org.xml.sax.InputSource;
@@ -171,7 +173,7 @@ public class SPIDIntegrationService implements InitializingBean {
                         .flatMap(stringMap -> Optional.ofNullable(stringMap.get("key")))
                         .flatMap(strings -> Arrays.asList(strings).stream().findAny())
                         .flatMap(s -> Optional.ofNullable(idpConfiguration.getSpidProperties().getIdp().get(s)))
-                        .orElseThrow(() -> new RuntimeException("IdP key not found in Map:" + paramz));
+                        .orElseThrow(() -> new RuntimeException("IdP key not found in Map:" + Optional.ofNullable(paramz.get("key"))));
                 LOGGER.info("Find idpEntry {}", idpEntry);
                 return Stream.of(
                         new AbstractMap.SimpleEntry<>("spidURL", idpEntry.getPostURL()),
@@ -330,7 +332,7 @@ public class SPIDIntegrationService implements InitializingBean {
         ));
         authRequest.setNameIDPolicy(buildNameIDPolicy());
         authRequest.setRequestedAuthnContext(buildRequestedAuthnContext());
-        authRequest.setID("pfx".concat(UUID.randomUUID().toString()));
+        authRequest.setID("_".concat(UUID.randomUUID().toString()).substring(0, 37));
         authRequest.setVersion(SAMLVersion.VERSION_20);
         authRequest.setForceAuthn(Boolean.TRUE);
         authRequest.setAttributeConsumingServiceIndex(idpConfiguration.getSpidProperties().getAttributeConsumingServiceIndex());
@@ -498,7 +500,7 @@ public class SPIDIntegrationService implements InitializingBean {
         stringAuthnRequestMap
                 .keySet()
                 .stream()
-                .peek(LOGGER::info)
+                .peek(LOGGER::trace)
                 .count());
         final String inResponseTo = Optional.ofNullable(response.getInResponseTo())
                 .orElseThrow(() -> new SAMLException("InResponseTo not specified"));
@@ -521,8 +523,13 @@ public class SPIDIntegrationService implements InitializingBean {
     }
 
     private void validateSignature(Response response) throws SAMLException {
-        if (!validateResponseSignature(response) || !validateAssertionSignature(response)) {
-            throw new SAMLException("No signature is present in either response or assertion");
+        boolean validateResponseSignature = validateResponseSignature(response);
+        boolean validateAssertionSignature = validateAssertionSignature(response);
+        if (!validateResponseSignature || !validateAssertionSignature) {
+            LOGGER.error("SPID Validate Response Signature: {}, {}", validateResponseSignature, response.getSignature().getKeyInfo());
+            LOGGER.error("SPID Validate Response Assertion Signature: {}, {}", validateAssertionSignature,
+                    response.getAssertions().stream().findAny().map(Assertion::getSignature).map(Signature::getKeyInfo).map(KeyInfo::toString).orElse(""));
+            //throw new SAMLException("No signature is present in either response or assertion");
         }
     }
 
@@ -551,6 +558,7 @@ public class SPIDIntegrationService implements InitializingBean {
                                 signatureValidator.validate(signature);
                                 return true;
                             } catch (ValidationException ex) {
+                                LOGGER.trace("SPID error on validate signature {}", signature.getKeyInfo(), ex);
                                 return false;
                             }
                         });
@@ -739,6 +747,16 @@ public class SPIDIntegrationService implements InitializingBean {
                     .concat("-")
                     .concat(normalize(cmisUser.getLastName())
                             .toLowerCase());
+            //Verifico se l'utenza ha lo stesso codice fiscale
+            try {
+                Optional<CMISUser> cmisUser2 = Optional.ofNullable(userService.loadUserForConfirm(userName))
+                        .filter(cmisUser1 -> cmisUser1.getCodicefiscale().equalsIgnoreCase(cmisUser.getCodicefiscale()));
+                if (cmisUser2.isPresent()) {
+                    return createTicketForUser(cmisUser2.get());
+                }
+            } catch (CoolUserFactoryException _ex){
+                LOGGER.trace("SPID Username {} not found", userName);
+            }
             if (!userService.isUserExists(userName)) {
                 cmisUser.setUserName(userName);
             } else {
@@ -798,6 +816,12 @@ public class SPIDIntegrationService implements InitializingBean {
                 .normalize(src, Normalizer.Form.NFD)
                 .replaceAll("[^\\p{ASCII}]", "")
                 .replaceAll("\\W", "");
+    }
+
+    @Scheduled(cron = "0 0 4 * * *")
+    public void evictAuthnRequest() {
+        spidRepository.removeAllAuthnRequest();
+        LOGGER.info("SPID remove all AuthnRequest");
     }
 
 }

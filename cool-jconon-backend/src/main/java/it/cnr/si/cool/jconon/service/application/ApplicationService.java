@@ -34,9 +34,7 @@ import it.cnr.cool.security.service.UserService;
 import it.cnr.cool.security.service.impl.alfresco.CMISUser;
 import it.cnr.cool.service.BulkInfoCoolService;
 import it.cnr.cool.service.I18nService;
-import it.cnr.cool.util.JSONErrorPair;
-import it.cnr.cool.util.MimeTypes;
-import it.cnr.cool.util.StringUtil;
+import it.cnr.cool.util.*;
 import it.cnr.cool.web.scripts.exception.CMISApplicationException;
 import it.cnr.cool.web.scripts.exception.ClientMessageException;
 import it.cnr.si.cool.jconon.cmis.model.*;
@@ -47,10 +45,7 @@ import it.cnr.si.cool.jconon.service.SiperService;
 import it.cnr.si.cool.jconon.service.TypeService;
 import it.cnr.si.cool.jconon.service.cache.CompetitionFolderService;
 import it.cnr.si.cool.jconon.service.call.CallService;
-import it.cnr.si.cool.jconon.util.CallStato;
-import it.cnr.si.cool.jconon.util.CodiceFiscaleControllo;
-import it.cnr.si.cool.jconon.util.HSSFUtil;
-import it.cnr.si.cool.jconon.util.JcononGroups;
+import it.cnr.si.cool.jconon.util.*;
 import it.cnr.si.opencmis.criteria.Criteria;
 import it.cnr.si.opencmis.criteria.CriteriaFactory;
 import it.cnr.si.opencmis.criteria.Order;
@@ -60,6 +55,7 @@ import org.apache.chemistry.opencmis.client.bindings.spi.BindingSession;
 import org.apache.chemistry.opencmis.client.bindings.spi.http.Output;
 import org.apache.chemistry.opencmis.client.bindings.spi.http.Response;
 import org.apache.chemistry.opencmis.client.runtime.OperationContextImpl;
+import org.apache.chemistry.opencmis.client.util.OperationContextUtils;
 import org.apache.chemistry.opencmis.commons.PropertyIds;
 import org.apache.chemistry.opencmis.commons.data.ContentStream;
 import org.apache.chemistry.opencmis.commons.definitions.Choice;
@@ -79,15 +75,25 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.InitializingBean;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationContext;
 import org.springframework.stereotype.Service;
+import org.springframework.web.bind.annotation.RequestParam;
 
 import java.io.*;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.text.SimpleDateFormat;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.Map.Entry;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+import java.util.stream.StreamSupport;
 
 @Service
 public class ApplicationService implements InitializingBean {
@@ -129,6 +135,8 @@ public class ApplicationService implements InitializingBean {
     private CMISConfig cmisConfig;
     @Autowired
     private GroupService groupService;
+    @Value("${user.admin.username}")
+    private String adminUserName;
 
     @Autowired
     private QueueService queueService;
@@ -435,6 +443,10 @@ public class ApplicationService implements InitializingBean {
                     .addAll(call
                             .getPropertyValue(JCONONPropertyIds.CALL_ELENCO_ASSOCIATIONS
                                     .value()));
+            associationList
+                    .addAll(call
+                            .getPropertyValue(JCONONPropertyIds.CALL_ELENCO_SEZIONE_PRODOTTI
+                                    .value()));
         }
         return associationList;
     }
@@ -564,7 +576,12 @@ public class ApplicationService implements InitializingBean {
         BigInteger numMaxProdotti = call
                 .getPropertyValue(JCONONPropertyIds.CALL_NUMERO_MAX_PRODOTTI
                         .value());
-        if (call.getProperty(JCONONPropertyIds.CALL_ELENCO_ASSOCIATIONS.value()).getValues().contains(JCONONDocumentType.JCONON_ATTACHMENT_CURRICULUM_PROD_SCELTI_MULTIPLO.value())) {
+
+
+        if (Stream.concat(
+                call.getProperty(JCONONPropertyIds.CALL_ELENCO_ASSOCIATIONS.value()).getValues().stream(),
+                call.getProperty(JCONONPropertyIds.CALL_ELENCO_SEZIONE_PRODOTTI.value()).getValues().stream()
+            ).collect(Collectors.toList()).contains(JCONONDocumentType.JCONON_ATTACHMENT_CURRICULUM_PROD_SCELTI_MULTIPLO.value())) {
             Criteria criteria = CriteriaFactory
                     .createCriteria(JCONONDocumentType.JCONON_ATTACHMENT_CURRICULUM_PROD_SCELTI_MULTIPLO.queryName());
             criteria.add(Restrictions.inFolder(application.getId()));
@@ -587,33 +604,34 @@ public class ApplicationService implements InitializingBean {
             OperationContext operationContext = cmisSession.getDefaultContext();
             operationContext
                     .setIncludeRelationships(IncludeRelationships.SOURCE);
-            for (QueryResult queryResult : criteria.executeQuery(cmisSession,
-                    false, cmisSession.getDefaultContext())) {
-                totalNumItems++;
-                boolean existsRelProdotto = false;
-                if (!(queryResult.getRelationships() == null
-                        || queryResult.getRelationships().isEmpty())) {
-                    for (Relationship relationship : queryResult.getRelationships()) {
-                        if (relationship.getType().getId().equals(JCONONRelationshipType.JCONON_ATTACHMENT_IN_PRODOTTO.value())) {
-                            existsRelProdotto = true;
-                            if (((BigInteger) relationship.getTarget().getPropertyValue("cmis:contentStreamLength"))
-                                    .compareTo(BigInteger.ZERO) <= 0) {
-                                throw new ClientMessageException(
-                                        i18nService.getLabel("message.error.prodotti.scelti.allegato.empty", Locale.ITALY));
+            for (QueryResult queryResult : criteria.executeQuery(cmisSession,false, cmisSession.getDefaultContext())) {
+                if (hasParentType(cmisSession.getTypeDefinition(queryResult.getPropertyValueById(PropertyIds.OBJECT_TYPE_ID)), JCONONDocumentType.JCONON_ATTACHMENT_PRODOTTO.value())) {
+                    totalNumItems++;
+                    boolean existsRelProdotto = false;
+                    if (!(queryResult.getRelationships() == null
+                            || queryResult.getRelationships().isEmpty())) {
+                        for (Relationship relationship : queryResult.getRelationships()) {
+                            if (relationship.getType().getId().equals(JCONONRelationshipType.JCONON_ATTACHMENT_IN_PRODOTTO.value())) {
+                                existsRelProdotto = true;
+                                if (((BigInteger) relationship.getTarget().getPropertyValue("cmis:contentStreamLength"))
+                                        .compareTo(BigInteger.ZERO) <= 0) {
+                                    throw new ClientMessageException(
+                                            i18nService.getLabel("message.error.prodotti.scelti.allegato.empty", Locale.ITALY));
+                                }
                             }
                         }
                     }
+                    if (!existsRelProdotto)
+                        throw new ClientMessageException(
+                                i18nService.getLabel("message.error.prodotti.scelti.senza.allegato", Locale.ITALY));
                 }
-                if (!existsRelProdotto)
-                    throw new ClientMessageException(
-                            i18nService.getLabel("message.error.prodotti.scelti.senza.allegato", Locale.ITALY));
-            }
-            if (numMaxProdotti != null && totalNumItems > numMaxProdotti.longValue()) {
-                throw new ClientMessageException(i18nService.getLabel(
-                        "message.error.troppi.prodotti.scelti",
-                        Locale.ITALY,
-                        String.valueOf(totalNumItems),
-                        String.valueOf(numMaxProdotti)));
+                if (numMaxProdotti != null && totalNumItems > numMaxProdotti.longValue()) {
+                    throw new ClientMessageException(i18nService.getLabel(
+                            "message.error.troppi.prodotti.scelti",
+                            Locale.ITALY,
+                            String.valueOf(totalNumItems),
+                            String.valueOf(numMaxProdotti)));
+                }
             }
         }
     }
@@ -1622,6 +1640,253 @@ public class ApplicationService implements InitializingBean {
         return result;
     }
 
+    public void addContributorForProductAfterCommission(Folder call, Folder application, Session cmisSession, CMISUser user, Locale locale) {
+        Calendar now = new GregorianCalendar();
+        String applicationUser = application.<String>getPropertyValue(JCONONPropertyIds.APPLICATION_USER.value());
+        if (!call.<List<String>>getPropertyValue(PropertyIds.SECONDARY_OBJECT_TYPE_IDS)
+                .stream()
+                .anyMatch(s -> s.equalsIgnoreCase(JCONONPolicyType.JCONON_CALL_ASPECT_PRODUCTS_AFTER_COMMISSION.value())) ||
+            !(now.after(Optional.ofNullable(call.<Calendar>getPropertyValue(JCONONPropertyIds.CALL_SELECTED_PRODUCT_START_DATE.value()))
+                    .orElse(now)) && now.before(Optional.ofNullable(call.<Calendar>getPropertyValue(JCONONPropertyIds.CALL_SELECTED_PRODUCT_END_DATE.value()))
+                    .orElse(now)))) {
+            throw new ClientMessageException(i18nService.getLabel("message.call.configuration.error", locale));
+        }
+        if (!(user.isAdmin() || callService.isMemberOfConcorsiGroup(user) || applicationUser.equals(user.getId()))) {
+            throw new ClientMessageException(i18nService.getLabel("message.access.denieded", locale));
+        }
+        aclService.addAcl(
+                cmisService.getAdminSession(),
+                application.<String>getPropertyValue(CoolPropertyIds.ALFCMIS_NODEREF.value()),
+                Collections.singletonMap(user.getId(), ACLType.Contributor)
+        );
+        StreamSupport.stream(application.getChildren().spliterator(), false)
+                .filter(cmisObject -> call.<List<String>>getPropertyValue(JCONONPropertyIds.CALL_ELENCO_SEZIONE_PRODOTTI.value()).contains(cmisObject.getType().getId()))
+                .filter(cmisObject -> {
+                        return Optional.ofNullable(cmisObject.<String>getPropertyValue(JCONONPropertyIds.CM_OWNER.value()))
+                                .map(owner -> owner.equalsIgnoreCase(adminUserName))
+                                .orElse(Boolean.TRUE);
+                })
+                .forEach(cmisObject -> {
+                    cmisService.createAdminSession()
+                            .getObject(cmisObject)
+                            .updateProperties(
+                                    Stream.of(
+                                            new AbstractMap.SimpleEntry<>(JCONONPropertyIds.CM_OWNER.value(), applicationUser),
+                                            new AbstractMap.SimpleEntry<>(PropertyIds.SECONDARY_OBJECT_TYPE_IDS,
+                                                    Stream.concat(
+                                                            cmisObject.getSecondaryTypes().stream().map(SecondaryType::getId),
+                                                            Stream.of(JCONONPolicyType.OWNABLE.value())
+                                                    ).collect(Collectors.toList())
+                                            )).collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue))
+                            );
+                });
+        cmisService.createAdminSession()
+            .getObject(application)
+            .updateProperties(
+                Collections.singletonMap(JCONONPropertyIds.APPLICATION_FL_SELECTED_PRODUCT_FINISHED.value(), Boolean.FALSE)
+            );
+    }
+
+    public void removeContributorForProductAfterCommission(Folder call, Folder application, Session cmisSession, CMISUser user, Locale locale) {
+        Calendar now = new GregorianCalendar();
+        String applicationUser = application.<String>getPropertyValue(JCONONPropertyIds.APPLICATION_USER.value());
+        if (!call.<List<String>>getPropertyValue(PropertyIds.SECONDARY_OBJECT_TYPE_IDS)
+                .stream()
+                .anyMatch(s -> s.equalsIgnoreCase(JCONONPolicyType.JCONON_CALL_ASPECT_PRODUCTS_AFTER_COMMISSION.value())) ||
+                !(now.after(Optional.ofNullable(call.<Calendar>getPropertyValue(JCONONPropertyIds.CALL_SELECTED_PRODUCT_START_DATE.value()))
+                        .orElse(now)) && now.before(Optional.ofNullable(call.<Calendar>getPropertyValue(JCONONPropertyIds.CALL_SELECTED_PRODUCT_END_DATE.value()))
+                        .orElse(now)))) {
+            throw new ClientMessageException(i18nService.getLabel("message.call.configuration.error", locale));
+        }
+        if (!(user.isAdmin() || callService.isMemberOfConcorsiGroup(user) || applicationUser.equals(user.getId()))) {
+            throw new ClientMessageException(i18nService.getLabel("message.access.denieded", locale));
+        }
+        aclService.removeAcl(
+                cmisService.getAdminSession(),
+                application.<String>getPropertyValue(CoolPropertyIds.ALFCMIS_NODEREF.value()),
+                Collections.singletonMap(user.getId(), ACLType.Contributor)
+        );
+        StreamSupport.stream(application.getChildren().spliterator(), false)
+                .filter(cmisObject -> call.<List<String>>getPropertyValue(JCONONPropertyIds.CALL_ELENCO_SEZIONE_PRODOTTI.value()).contains(cmisObject.getType().getId()))
+                .filter(cmisObject -> {
+                    return Optional.ofNullable(cmisObject.<String>getPropertyValue(JCONONPropertyIds.CM_OWNER.value()))
+                            .map(owner -> owner.equalsIgnoreCase(applicationUser))
+                            .orElse(Boolean.TRUE);
+                })
+                .forEach(cmisObject -> {
+                    cmisService.createAdminSession()
+                            .getObject(cmisObject)
+                            .updateProperties(
+                                    Stream.of(
+                                            new AbstractMap.SimpleEntry<>(JCONONPropertyIds.CM_OWNER.value(), adminUserName),
+                                            new AbstractMap.SimpleEntry<>(PropertyIds.SECONDARY_OBJECT_TYPE_IDS,
+                                                    Stream.concat(
+                                                            cmisObject.getSecondaryTypes().stream().map(SecondaryType::getId),
+                                                            Stream.of(JCONONPolicyType.OWNABLE.value())
+                                                    ).collect(Collectors.toList())
+                                            )).collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue))
+                            );
+                });
+        cmisService.createAdminSession()
+            .getObject(application)
+            .updateProperties(
+                    Collections.singletonMap(JCONONPropertyIds.APPLICATION_FL_SELECTED_PRODUCT_FINISHED.value(), Boolean.TRUE)
+            );
+    }
+
+    public List<ApplicationState> findApplicationState(Session session, String user) {
+        final OperationContext defaultContext = session.getDefaultContext();
+        Criteria criteriaApplications = CriteriaFactory.createCriteria(JCONONFolderType.JCONON_APPLICATION.queryName(), "root");
+        criteriaApplications.addColumn(JCONONPropertyIds.APPLICATION_STATO_DOMANDA.value());
+        criteriaApplications.addColumn(JCONONPropertyIds.APPLICATION_ESCLUSIONE_RINUNCIA.value());
+        criteriaApplications.add(Restrictions.ne(JCONONPropertyIds.APPLICATION_STATO_DOMANDA.value(), StatoDomanda.INIZIALE.value));
+        criteriaApplications.add(Restrictions.eq(JCONONPropertyIds.APPLICATION_USER.value(), user));
+        ItemIterable<QueryResult> applications = criteriaApplications.executeQuery(session, false, defaultContext);
+        return StreamSupport.stream(applications.getPage(Integer.MAX_VALUE).spliterator(), false)
+                .map(queryResult -> {
+                    return new ApplicationState(
+                        queryResult.<String>getPropertyValueById(JCONONPropertyIds.APPLICATION_STATO_DOMANDA.value()),
+                        queryResult.<String>getPropertyValueById(JCONONPropertyIds.APPLICATION_ESCLUSIONE_RINUNCIA.value())
+                    );
+                })
+                .collect(Collectors.groupingBy(
+                        Function.identity(),
+                        Collectors.counting())).entrySet().stream()
+                .map(applicationStateLongEntry -> {
+                    return new ApplicationState(
+                            applicationStateLongEntry.getKey().getStato_domanda(),
+                            applicationStateLongEntry.getKey().getEsclusione_rinuncia(),
+                            applicationStateLongEntry.getValue()
+                    );
+                }).collect(Collectors.toList());
+    }
+
+    public Map<String, Object> findApplications(Session session, Integer page, Integer offset, String user, boolean fetchCall,
+                                                String type, FilterType filterType, String callCode, LocalDate inizioScadenza,
+                                                LocalDate fineScadenza, String applicationStatus,
+                                                String firstname, String lastname, String codicefiscale,
+                                                String callId) {
+        Map<String, Object> model = new HashMap<String, Object>();
+        final OperationContext defaultContext = OperationContextUtils.copyOperationContext(session.getDefaultContext());
+        defaultContext.setMaxItemsPerPage(offset);
+        Criteria criteriaApplications = CriteriaFactory.createCriteria(JCONONFolderType.JCONON_APPLICATION.queryName(), "root");
+        criteriaApplications.addColumn(PropertyIds.OBJECT_ID);
+        criteriaApplications.addColumn(PropertyIds.PARENT_ID);
+        criteriaApplications.add(Restrictions.inTree(
+                Optional.ofNullable(callId).filter(s -> !s.isEmpty()).orElseGet(() -> competitionService.getCompetitionFolder().getString("id")))
+        );
+        criteriaApplications.add(Restrictions.ne(JCONONPropertyIds.APPLICATION_STATO_DOMANDA.value(), StatoDomanda.INIZIALE.value));
+        if (Optional.ofNullable(user).filter(s -> s.length() > 0).isPresent()) {
+            criteriaApplications.add(Restrictions.eq(JCONONPropertyIds.APPLICATION_USER.value(), user));
+        }
+        final Optional<String> applicationStatusOpt = Optional.ofNullable(applicationStatus).filter(s -> !s.isEmpty()).filter(s -> !s.equalsIgnoreCase("all"));
+        final Optional<String> typeOpt = Optional.ofNullable(type).filter(s -> !s.isEmpty());
+        final Optional<String> firstnameOpt = Optional.ofNullable(firstname).filter(s -> !s.isEmpty());
+        final Optional<String> lastnameOpt = Optional.ofNullable(lastname).filter(s -> !s.isEmpty());
+        final Optional<String> codicefiscaleOpt = Optional.ofNullable(codicefiscale).filter(s -> !s.isEmpty());
+
+        if (applicationStatusOpt.isPresent()) {
+            switch (applicationStatusOpt.get()) {
+                case "P" :
+                    criteriaApplications.add(Restrictions.eq(JCONONPropertyIds.APPLICATION_STATO_DOMANDA.value(), StatoDomanda.PROVVISORIA.value));
+                    break;
+                case "C" :
+                    criteriaApplications.add(Restrictions.eq(JCONONPropertyIds.APPLICATION_STATO_DOMANDA.value(), StatoDomanda.CONFERMATA.value));
+                    break;
+                case "active" :
+                    criteriaApplications.add(Restrictions.eq(JCONONPropertyIds.APPLICATION_STATO_DOMANDA.value(), StatoDomanda.CONFERMATA.value));
+                    criteriaApplications.add(Restrictions.isNull(JCONONPropertyIds.APPLICATION_ESCLUSIONE_RINUNCIA.value()));
+                    break;
+                case "excluded" :
+                    criteriaApplications.add(Restrictions.isNotNull(JCONONPropertyIds.APPLICATION_ESCLUSIONE_RINUNCIA.value()));
+                    break;
+            }
+        }
+        if (firstnameOpt.isPresent()) {
+            criteriaApplications.add(Restrictions.contains(JCONONPropertyIds.APPLICATION_NOME.value(),
+                    firstnameOpt
+                            .map(s -> "\'*".concat(s).concat("*\''"))
+                            .orElse("")
+            ));
+        }
+        if (lastnameOpt.isPresent()) {
+            criteriaApplications.add(Restrictions.contains(JCONONPropertyIds.APPLICATION_COGNOME.value(),
+                    lastnameOpt
+                            .map(s -> "\'*".concat(s).concat("*\''"))
+                            .orElse("")
+            ));
+        }
+        if (codicefiscaleOpt.isPresent()) {
+            criteriaApplications.add(Restrictions.like(JCONONPropertyIds.APPLICATION_CODICE_FISCALE.value(),
+                    codicefiscaleOpt
+                            .map(String::toUpperCase)
+                            .map(s -> "%".concat(s).concat("%"))
+                            .orElse("")
+            ));
+        }
+
+        List<Map<String, Object>> items = new ArrayList<>();
+        ItemIterable<QueryResult> applications = criteriaApplications.executeQuery(session, false, defaultContext);
+        long totalNumItems = applications.getTotalNumItems();
+        for (QueryResult result : applications.skipTo(page * defaultContext.getMaxItemsPerPage()).getPage(defaultContext.getMaxItemsPerPage())) {
+            final Map<String, Object> applicationMap = CMISUtil.convertToProperties(session.getObject(result.<String>getPropertyValueById(PropertyIds.OBJECT_ID), defaultContext));
+            if (fetchCall) {
+                final Folder call = Optional.ofNullable(session.getObject(result.<String>getPropertyValueById(PropertyIds.PARENT_ID), defaultContext))
+                                                .filter(Folder.class::isInstance)
+                                                .map(Folder.class::cast)
+                                                .orElseThrow(() -> new CmisInvalidArgumentException("Parent object is not folder!"));
+                if (typeOpt.isPresent() && !call.getType().getQueryName().equals(typeOpt.get())) {
+                    totalNumItems--;
+                    continue;
+                }
+                if (Optional.ofNullable(filterType).isPresent()) {
+                    if ((filterType.equals(FilterType.active) && !callService.isBandoInCorso(call)) ||
+                            (filterType.equals(FilterType.expire) && callService.isBandoInCorso(call))) {
+                        totalNumItems--;
+                        continue;
+                    }
+                }
+                if (Optional.ofNullable(callCode).filter(s -> s.length() > 0).isPresent()) {
+                    if (Optional.ofNullable(call.<String>getPropertyValue(JCONONPropertyIds.CALL_CODICE.value()))
+                                .map(s -> s.toUpperCase())
+                                .filter(s -> !s.contains(callCode.toUpperCase()))
+                                .isPresent()
+                    )  {
+                        totalNumItems--;
+                        continue;
+                    }
+                }
+                if (Optional.ofNullable(inizioScadenza).isPresent()) {
+                    if (Optional.ofNullable(call.<Calendar>getPropertyValue(JCONONPropertyIds.CALL_DATA_FINE_INVIO_DOMANDE.value()))
+                            .map(cal -> LocalDateTime.ofInstant(cal.toInstant(), ZoneId.systemDefault()))
+                            .filter(dateTime -> dateTime.isBefore(inizioScadenza.atStartOfDay()))
+                            .isPresent()
+                    )  {
+                        totalNumItems--;
+                        continue;
+                    }
+                }
+                if (Optional.ofNullable(fineScadenza).isPresent()) {
+                    if (Optional.ofNullable(call.<Calendar>getPropertyValue(JCONONPropertyIds.CALL_DATA_FINE_INVIO_DOMANDE.value()))
+                            .map(cal -> LocalDateTime.ofInstant(cal.toInstant(), ZoneId.systemDefault()))
+                            .filter(dateTime -> dateTime.isAfter(fineScadenza.atStartOfDay()))
+                            .isPresent()
+                    )  {
+                        totalNumItems--;
+                        continue;
+                    }
+                }
+                applicationMap.put("call", CMISUtil.convertToProperties(call));
+            }
+            items.add(applicationMap);
+        }
+        model.put("count", totalNumItems);
+        model.put("page", page);
+        model.put("offset", defaultContext.getMaxItemsPerPage());
+        model.put("items", items);
+        return model;
+    }
+
     public enum StatoDomanda {
         CONFERMATA("C", "Inviata"), INIZIALE("I", "Iniziale"), PROVVISORIA("P", "Provvisoria"), ESCLUSA("E", "Esclusione"),
         RINUNCIA("R", "Rinuncia"), SCHEDA_ANONIMA_RESPINTA("S", "Scheda anonima respinta"), NON_AMMESSO("N", "Non Ammesso"),
@@ -1650,7 +1915,52 @@ public class ApplicationService implements InitializingBean {
             return value;
         }
 
+    }
 
+    public class ApplicationState implements Serializable{
+        private final String stato_domanda;
+        private final String esclusione_rinuncia;
+        private Long count;
+
+        public ApplicationState(String stato_domanda, String esclusione_rinuncia) {
+            this.stato_domanda = stato_domanda;
+            this.esclusione_rinuncia = esclusione_rinuncia;
+        }
+
+        public ApplicationState(String stato_domanda, String esclusione_rinuncia, Long count) {
+            this(stato_domanda, esclusione_rinuncia);
+            this.count = count;
+        }
+
+        public String getStato_domanda() {
+            return stato_domanda;
+        }
+
+        public String getEsclusione_rinuncia() {
+            return esclusione_rinuncia;
+        }
+
+        public Long getCount() {
+            return count;
+        }
+
+        public void setCount(Long count) {
+            this.count = count;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            ApplicationState that = (ApplicationState) o;
+            return Objects.equals(stato_domanda, that.stato_domanda) &&
+                    Objects.equals(esclusione_rinuncia, that.esclusione_rinuncia);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(stato_domanda, esclusione_rinuncia);
+        }
     }
 
 }

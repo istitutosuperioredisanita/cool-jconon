@@ -1,7 +1,7 @@
 /*global params*/
 define(['jquery', 'header', 'i18n', 'cnr/cnr.ui', 'cnr/cnr.bulkinfo', 'json!common', 'cnr/cnr.jconon', 'cnr/cnr.url',
-  'cnr/cnr.application', 'cnr/cnr.attachments', 'json!cache', 'cnr/cnr.call', 'cnr/cnr', 'cnr/cnr.ui.widgets', 'cnr/cnr.ui.wysiwyg', 'cnr/cnr.ui.country',
-  'cnr/cnr.ui.city'], function ($, header, i18n, UI, BulkInfo, common, jconon, URL, Application, Attachments, cache, Call, CNR, Widgets, Wysiwyg) {
+  'cnr/cnr.application', 'cnr/cnr.attachments', 'json!cache', 'cnr/cnr.call', 'cnr/cnr', 'cnr/cnr.ui.widgets', 'cnr/cnr.ui.wysiwyg', 'cnr/cnr.ui.amministrazioni-ipa', 'cnr/cnr.ui.country',
+  'cnr/cnr.ui.city'], function ($, header, i18n, UI, BulkInfo, common, jconon, URL, Application, Attachments, cache, Call, CNR, Widgets, Wysiwyg, AmministrazioniIpa) {
   "use strict";
 
   var content = $('#field'), bulkinfo, forms = [], aspects = [],
@@ -19,6 +19,8 @@ define(['jquery', 'header', 'i18n', 'cnr/cnr.ui', 'cnr/cnr.bulkinfo', 'json!comm
     saved;
 
   Widgets['ui.wysiwyg'] = Wysiwyg;
+  Widgets['ui.amministrazioni-ipa'] = AmministrazioniIpa;
+
   if (content.hasClass('error-allegati-empty')) {
     UI.alert(content.data('message') || i18n['message.error.allegati.empty'], null, null, true);
   }
@@ -213,7 +215,7 @@ define(['jquery', 'header', 'i18n', 'cnr/cnr.ui', 'cnr/cnr.bulkinfo', 'json!comm
         },
         fetchCmisObject: true,
         maxItems: 5,
-        filter: true,
+        filter: false,
         filterOnType: true,
         includeAspectOnQuery: true,
         calculateTotalNumItems: true,
@@ -339,6 +341,7 @@ define(['jquery', 'header', 'i18n', 'cnr/cnr.ui', 'cnr/cnr.bulkinfo', 'json!comm
 
   function manageIntestazione(call, application) {
     var descRid = null,
+      callDescrizioneRidotta = call["jconon_call:descrizione_ridotta"] !== null ? call["jconon_call:descrizione_ridotta"] : '',
       existApplication = application && application["jconon_application:stato_domanda"] !== 'I',
       isTemp = existApplication && application["jconon_application:stato_domanda"] === 'P',
       lastName = application && application["jconon_application:cognome"] !== undefined ? application["jconon_application:cognome"] : dataPeopleUser.lastName,
@@ -376,7 +379,7 @@ define(['jquery', 'header', 'i18n', 'cnr/cnr.ui', 'cnr/cnr.bulkinfo', 'json!comm
       });
       /*jslint unparam: false*/
     }
-    $('#call-desc-rid').append(call["jconon_call:descrizione_ridotta"] + (descRid !== null ? descRid : ""));
+    $('#call-desc-rid').append(callDescrizioneRidotta + (descRid !== null ? descRid : ""));
     $('#appl-rich').append(i18n['application.text.sottoscritto.' + (application['jconon_application:sesso'] ? application['jconon_application:sesso'] : 'M')] + ' ' + lastName + ' ' + firstName + '</br>' +
       (call['cmis:objectTypeId'] === 'F:jconon_call_employees:folder' ? i18n['cm.matricola'] + ': ' + dataPeopleUser.matricola + ' - ' + i18n['cm.email'] + ': ' + dataPeopleUser.email + '</br>' : '') +
       (call['cmis:objectTypeId'] === 'F:jconon_call_mobility_open:folder' ? '' : i18n['application.text.chiede.partecipare.predetta.procedura']));
@@ -585,14 +588,14 @@ define(['jquery', 'header', 'i18n', 'cnr/cnr.ui', 'cnr/cnr.bulkinfo', 'json!comm
             if (loadAspect) {
               if ((metadata['jconon_application:fl_cittadino_italiano'] && cache.jsonlistApplicationNoAspectsItalian.indexOf(section.attr('id')) === -1) ||
                   !(metadata['jconon_application:fl_cittadino_italiano'] && cache.jsonlistApplicationNoAspectsForeign.indexOf(section.attr('id')) === -1)) {
-                if (call["jconon_call:elenco_aspects"].indexOf(section.attr('id')) !== -1) {
+                if (call["jconon_call:elenco_aspects"] && call["jconon_call:elenco_aspects"].indexOf(section.attr('id')) !== -1) {
                   $('<tr></tr>')
                     .append('<td>' + String.fromCharCode(charCodeAspect++) + '</td>')
                     .append($('<td>').append(div))
                     .appendTo(content.find("#affix_tabDichiarazioni > :last-child > :last-child"));
-                } else if (call["jconon_call:elenco_aspects_sezione_cnr"].indexOf(section.attr('id')) !== -1) {
+                } else if (call["jconon_call:elenco_aspects_sezione_cnr"] && call["jconon_call:elenco_aspects_sezione_cnr"].indexOf(section.attr('id')) !== -1) {
                   div.appendTo(content.find("#affix_tabDatiCNR > :last-child"));
-                } else if (call["jconon_call:elenco_aspects_ulteriori_dati"].indexOf(section.attr('id')) !== -1) {
+                } else if (call["jconon_call:elenco_aspects_ulteriori_dati"] && call["jconon_call:elenco_aspects_ulteriori_dati"].indexOf(section.attr('id')) !== -1) {
                   div.appendTo(content.find("#affix_tabUlterioriDati > :last-child"));
                 }
               }
@@ -643,7 +646,8 @@ define(['jquery', 'header', 'i18n', 'cnr/cnr.ui', 'cnr/cnr.bulkinfo', 'json!comm
         .append('<br/><br/>')
         .append(print_trattamento_dati_personali);
     }
-    aspects = call["jconon_call:elenco_aspects"]
+    aspects = []
+      .concat(call["jconon_call:elenco_aspects"])
       .concat(call["jconon_call:elenco_aspects_sezione_cnr"])
       .concat(call["jconon_call:elenco_aspects_ulteriori_dati"]);
     /*jslint unparam: true*/

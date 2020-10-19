@@ -9,10 +9,10 @@ jconon:
   - SPID_IDP_TEST_POSTURL=http://spid-testenv2.test.si.cnr.it/sso
   - SPID_ASSERTIONCONSUMERSERVICEINDEX=2
   - SPID_ATTRIBUTECONSUMINGSERVICEINDEX=2
-  - SPID_DESTINATION=http://cool-jconon.test.si.cnr.it/jconon/spid/send-response
+  - SPID_DESTINATION=http://cool-jconon.test.si.cnr.it/spid/send-response
   volumes:
   - ./webapp_logs:/logs
   - /tmp
-  command: java -Xmx256m -Xss512k -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=8787 -Djava.security.egd=file:/dev/./urandom -jar /opt/jconon.war
+  command: java -Xmx256m -Xss512k -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=8787 -Dserver.servlet.context-path= -Djava.security.egd=file:/dev/./urandom -jar /opt/jconon.war
   labels:
   - SERVICE_NAME=##{SERVICE_NAME}##

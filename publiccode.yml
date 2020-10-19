@@ -4,10 +4,10 @@
 
 publiccodeYmlVersion: '0.2'
 name: cool-jconon
-releaseDate: '2020-03-03'
+releaseDate: '2020-10-15'
 url: 'https://github.com/consiglionazionaledellericerche/cool-jconon'
 applicationSuite: cool
-softwareVersion: 4.3.14
+softwareVersion: 4.4.32
 developmentStatus: stable
 softwareType: standalone/web
 platforms:
@@ -63,7 +63,7 @@ description:
       Selezioni on-line permette di gestire l'iter concorsuale di un bando
       pubblico in tutte le sue fasi
     documentation: >-
-      https://github.com/consiglionazionaledellericerche/cool-jconon/tree/master/docs
+      https://consiglionazionaledellericerche.github.io/cool-jconon
     apiDocumentation: 'https://github.com/consiglionazionaledellericerche/cool-jconon'
     screenshots:
       - docs/screenshot/responsive_it.png

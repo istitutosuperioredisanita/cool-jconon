@@ -36,7 +36,9 @@ import it.cnr.cool.mail.model.AttachmentBean;
 import it.cnr.cool.mail.model.EmailMessage;
 import it.cnr.cool.rest.util.Util;
 import it.cnr.cool.security.GroupsEnum;
+import it.cnr.cool.security.service.GroupService;
 import it.cnr.cool.security.service.UserService;
+import it.cnr.cool.security.service.impl.alfresco.CMISAuthority;
 import it.cnr.cool.security.service.impl.alfresco.CMISUser;
 import it.cnr.cool.service.BulkInfoCoolService;
 import it.cnr.cool.service.I18nService;
@@ -65,7 +67,9 @@ import net.sf.jasperreports.engine.data.JsonDataSource;
 import net.sf.jasperreports.engine.export.JRPdfExporter;
 import net.sf.jasperreports.engine.export.JRPdfExporterParameter;
 import net.sf.jasperreports.engine.export.JRXlsExporter;
+import net.sf.jasperreports.engine.export.ooxml.JRDocxExporter;
 import net.sf.jasperreports.engine.fill.JRGzipVirtualizer;
+import net.sf.jasperreports.export.SimpleDocxReportConfiguration;
 import net.sf.jasperreports.export.SimpleExporterInput;
 import net.sf.jasperreports.export.SimpleOutputStreamExporterOutput;
 import net.sf.jasperreports.export.SimpleXlsReportConfiguration;
@@ -169,7 +173,12 @@ public class PrintService {
     );
     private List<String> headCSVCall = Arrays.asList(
             "Codice bando", "Sede di lavoro", "Struttura di riferimento",
-            "N° G.U.R.I.", "Data G.U.R.I.", "Data scadenza", "Responsabile (Nominativo)", "Email Responsabile.", "N. Posti", "Profilo/Livello"
+            "N° G.U.R.I.", "Data G.U.R.I.", "Data scadenza", "Responsabile (Nominativo)",
+            "Email Responsabile.", "N. Posti", "Profilo/Livello",
+            "Bando - Num. Protocollo", "Bando - Data Protocollo",
+            "Commissione - Num. Protocollo", "Commissione - Data Protocollo",
+            "Mod. Commissione - Num. Protocollo", "Mod. Commissione - Data Protocollo",
+            "Nom. Segretario - Num. Protocollo", "Nom. Segretario - Data Protocollo"
     );
     private List<String> headCSVCommission = Arrays.asList(
             "Codice bando", "UserName", "Appellativo",
@@ -207,6 +216,8 @@ public class PrintService {
     private ACLService aclService;
     @Autowired
     private TypeService typeService;
+    @Autowired
+    private GroupService groupService;
 
     @Autowired
     private ApplicationContext context;
@@ -241,6 +252,29 @@ public class PrintService {
 
     protected boolean isConfirmed(Folder application) {
         return application.getPropertyValue(JCONONPropertyIds.APPLICATION_STATO_DOMANDA.value()).equals(ApplicationService.StatoDomanda.CONFERMATA.getValue());
+    }
+
+    public void printCurriculumStrutturato(Session cmisSession, String nodeRef, final String contextURL, final Locale locale) {
+        try {
+            LOGGER.info("Start print curriculum for application width id: {}", nodeRef);
+            Folder application = (Folder) cmisSession.getObject(nodeRef);
+            String nameRicevutaReportModel = "Curriculum strutturato.docx";
+            byte[] stampaByte = getCurriculumStrutturatoReportModel(cmisSession,
+                    application, contextURL, nameRicevutaReportModel, false);
+            InputStream is = new ByteArrayInputStream(stampaByte);
+            Map<String, Object> properties = new HashMap<String, Object>();
+            properties.put(PropertyIds.OBJECT_TYPE_ID, JCONONDocumentType.JCONON_ATTACHMENT_CURRICULUM_VITAE_STRUTTURATO.value());
+            properties.put(PropertyIds.NAME, nameRicevutaReportModel);
+            ContentStream contentStream = new ContentStreamImpl(nameRicevutaReportModel,
+                    BigInteger.valueOf(is.available()),
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    is);
+            Document doc = application.createDocument(properties, contentStream, VersioningState.MAJOR);
+            if (LOGGER.isInfoEnabled())
+                LOGGER.info("End generate curriculum for application width id: {} and document id: {}", nodeRef, doc.getId());
+        } catch (Exception t) {
+            LOGGER.error("Error while print curriculum for application width id:" + nodeRef, t);
+        }
     }
 
     public void printApplication(String nodeRef, final String contextURL, final Locale locale, final boolean email) {
@@ -318,6 +352,113 @@ public class PrintService {
                 "-" +
                 dataApplication +
                 ".pdf";
+    }
+
+    public byte[] getCurriculumStrutturatoReportModel(Session cmisSession, Folder application, String contextURL, String nameRicevutaReportModel, boolean immediate)
+            throws CMISApplicationException {
+        Folder call = application.getFolderParent();
+        Locale locale = Locale.ITALY;
+        Properties props = i18nService.loadLabels(locale);
+        props.putAll(competitionService.getDynamicLabels(call, cmisSession));
+        ApplicationModel applicationModel = new ApplicationModel(application,
+                cmisSession.getDefaultContext(),
+                props, contextURL);
+        try {
+            CMISUser applicationUser = userService.loadUserForConfirm(application.getPropertyValue(JCONONPropertyIds.APPLICATION_USER.value()));
+            applicationModel.getProperties().put("jasperReport:user_matricola", applicationUser.getMatricola());
+            applicationModel.getProperties().put("jasperReport:user_email_comunicazione", applicationUser.getEmail());
+        } catch (CoolUserFactoryException e) {
+            LOGGER.error("User not found", e);
+        }
+
+        final Gson gson = new GsonBuilder()
+                .setDateFormat("yyyy-MM-dd'T'HH:mm:ss")
+                .excludeFieldsWithoutExposeAnnotation()
+                .registerTypeAdapter(GregorianCalendar.class, new JsonSerializer<GregorianCalendar>() {
+                    @Override
+                    public JsonElement serialize(GregorianCalendar src, Type typeOfSrc,
+                                                 JsonSerializationContext context) {
+                        return context.serialize(src.getTime());
+                    }
+                }).create();
+
+        if (call.getPropertyValue(JCONONPropertyIds.CALL_ELENCO_SEZIONE_CURRICULUM.value()) != null) {
+            applicationModel.getProperties().put("curriculum", getCurriculum(
+                    call
+                            .getPropertyValue(JCONONPropertyIds.CALL_ELENCO_SEZIONE_CURRICULUM
+                                    .value()),
+                    application, cmisSession, applicationModel));
+        }
+        if (call.getPropertyValue(JCONONPropertyIds.CALL_ELENCO_SEZIONE_CURRICULUM_ULTERIORE.value()) != null) {
+            applicationModel.getProperties().put("curriculum_ulteriore", getCurriculum(
+                    call
+                            .getPropertyValue(JCONONPropertyIds.CALL_ELENCO_SEZIONE_CURRICULUM_ULTERIORE
+                                    .value()),
+                    application, cmisSession, applicationModel));
+        }
+        if (call.getPropertyValue(JCONONPropertyIds.CALL_ELENCO_SEZIONE_PRODOTTI.value()) != null) {
+            applicationModel.getProperties().put("prodotti", getProdotti(
+                    call.getPropertyValue(JCONONPropertyIds.CALL_ELENCO_SEZIONE_PRODOTTI.value()),
+                    application, JCONONPolicyType.PEOPLE_NO_SELECTED_PRODUCT, cmisSession, applicationModel));
+            applicationModel.getProperties().put("prodottiScelti", getProdotti(
+                    call.getPropertyValue(JCONONPropertyIds.CALL_ELENCO_SEZIONE_PRODOTTI.value()),
+                    application, JCONONPolicyType.PEOPLE_SELECTED_PRODUCT, cmisSession, applicationModel));
+        }
+        if (call.getPropertyValue(JCONONPropertyIds.CALL_ELENCO_SEZIONE_SCHEDE_ANONIME.value()) != null) {
+            applicationModel.getProperties().put("schedeAnonime", getCurriculum(
+                    call
+                            .getPropertyValue(JCONONPropertyIds.CALL_ELENCO_SEZIONE_SCHEDE_ANONIME
+                                    .value()),
+                    application, cmisSession, applicationModel));
+        }
+        String labelSottoscritto = i18nService.getLabel(
+                "application.text.sottoscritto.lower." + application.getPropertyValue(JCONONPropertyIds.APPLICATION_SESSO.value()), locale);
+
+        for (Object key : call.getProperty(JCONONPropertyIds.CALL_ELENCO_SEZIONI_DOMANDA.value()).getValues()) {
+            applicationModel.getProperties().put(String.valueOf(key), props.get(key));
+        }
+        if (immediate) {
+            applicationModel.getProperties().put(JCONONPropertyIds.APPLICATION_STATO_DOMANDA.value(), StatoDomanda.CONFERMATA.getValue());
+            applicationModel.getProperties().put(JCONONPropertyIds.APPLICATION_DATA_DOMANDA.value(), Calendar.getInstance());
+        }
+        String json = "{\"properties\":" + gson.toJson(applicationModel.getProperties()) + "}";
+
+        try {
+
+            Map<String, Object> parameters = new HashMap<String, Object>();
+            JRDataSource datasource = new JsonDataSource(new ByteArrayInputStream(json.getBytes(Charset.forName("UTF-8"))), "properties");
+            JRGzipVirtualizer vir = new JRGzipVirtualizer(100);
+            final ResourceBundle resourceBundle = ResourceBundle.getBundle(
+                    "net.sf.jasperreports.view.viewer", locale);
+            parameters.put(JRParameter.REPORT_LOCALE, locale);
+            parameters.put(JRParameter.REPORT_RESOURCE_BUNDLE, resourceBundle);
+            parameters.put(JRParameter.REPORT_DATA_SOURCE, datasource);
+            parameters.put(JRParameter.REPORT_VIRTUALIZER, vir);
+            parameters.put("DIR_IMAGE", new ClassPathResource(PRINT_RESOURCE_PATH).getPath());
+            parameters.put("SUBREPORT_DIR", new ClassPathResource(PRINT_RESOURCE_PATH).getPath());
+
+            ClassLoader classLoader = ClassLoader.getSystemClassLoader();
+            parameters.put(JRParameter.REPORT_CLASS_LOADER, classLoader);
+
+            ClassPathResource classPathResource = new ClassPathResource(PRINT_RESOURCE_PATH + "CurriculumStrutturato.jasper");
+                JasperPrint jasperPrint = JasperFillManager.fillReport(classPathResource.getInputStream(), parameters);
+
+
+            ByteArrayOutputStream os = new ByteArrayOutputStream();
+            JRDocxExporter export = new JRDocxExporter();
+            export.setExporterInput(new SimpleExporterInput(jasperPrint));
+            export.setExporterOutput(new SimpleOutputStreamExporterOutput(os));
+
+            SimpleDocxReportConfiguration config = new SimpleDocxReportConfiguration();
+            config.setFlexibleRowHeight(false); //Set desired configuration
+            config.setFramesAsNestedTables(false);
+            export.setConfiguration(config);
+            export.exportReport();
+
+            return os.toByteArray();
+        } catch (Exception e) {
+            throw new CMISApplicationException("Error in JASPER", e);
+        }
     }
 
     @SuppressWarnings({"unchecked", "deprecation"})
@@ -708,13 +849,13 @@ public class PrintService {
                     continue;
                 if (!allAllegati &&
                         Optional.ofNullable(riga)
-                        .map(Document::getDocumentType)
-                        .map(DocumentType::getId)
-                        .filter(type -> Arrays.asList(
-                                JCONONDocumentType.JCONON_ATTACHMENT_DOCUMENTO_RICONOSCIMENTO.value(),
-                                JCONONDocumentType.JCONON_ATTACHMENT_DIC_SOST.value()
-                        ).contains(type))
-                        .isPresent())
+                                .map(Document::getDocumentType)
+                                .map(DocumentType::getId)
+                                .filter(type -> Arrays.asList(
+                                        JCONONDocumentType.JCONON_ATTACHMENT_DOCUMENTO_RICONOSCIMENTO.value(),
+                                        JCONONDocumentType.JCONON_ATTACHMENT_DIC_SOST.value()
+                                ).contains(type))
+                                .isPresent())
                     continue;
 
                 String link = applicationModel.getContextURL()
@@ -1934,24 +2075,29 @@ public class PrintService {
                 if (type.equalsIgnoreCase("application")) {
                     wb = createHSSFWorkbook(headCSVApplication);
                     HSSFSheet sheet = wb.getSheet(SHEET_DOMANDE);
-                    int index = 1;
+                    final int[] index = {1};
                     for (String callId : ids) {
-                        Criteria criteriaApplications = CriteriaFactory.createCriteria(JCONONFolderType.JCONON_APPLICATION.queryName());
-                        criteriaApplications.addColumn(PropertyIds.OBJECT_ID);
-                        criteriaApplications.add(Restrictions.inFolder(callId));
-                        criteriaApplications.add(Restrictions.eq(JCONONPropertyIds.APPLICATION_STATO_DOMANDA.value(), ApplicationService.StatoDomanda.CONFERMATA.getValue()));
-                        ItemIterable<QueryResult> applications = criteriaApplications.executeQuery(session, false, session.getDefaultContext());
-                        for (QueryResult application : applications.getPage(Integer.MAX_VALUE)) {
-                            Folder applicationObject = (Folder) session.getObject(application.<String>getPropertyValueById(PropertyIds.OBJECT_ID));
-                            CMISUser user = null;
-                            try {
-                                user = userService.loadUserForConfirm(applicationObject.getPropertyValue("jconon_application:user"));
-                            } catch (CoolUserFactoryException _ex) {
-                                LOGGER.error("USER {} not found", userId, _ex);
-                                user = new CMISUser(applicationObject.getPropertyValue("jconon_application:user"));
-                            }
-                            getRecordCSV(session, applicationObject.getFolderParent(), applicationObject, user, contexURL, sheet, index++);
-                        }
+                        Folder call = Optional.ofNullable(session.getObject(callId))
+                                .filter(Folder.class::isInstance)
+                                .map(Folder.class::cast)
+                                .orElseThrow(() -> new RuntimeException("Cannot find call"));
+                        StreamSupport.stream(call.getChildren().spliterator(), false)
+                                .filter(cmisObject -> cmisObject.getType().getId().equals(JCONONFolderType.JCONON_APPLICATION.value()))
+                                .filter(cmisObject -> cmisObject.getPropertyValue(
+                                        JCONONPropertyIds.APPLICATION_STATO_DOMANDA.value()).equals(ApplicationService.StatoDomanda.CONFERMATA.getValue()))
+                                .filter(Folder.class::isInstance)
+                                .map(Folder.class::cast)
+                                .forEach(applicationObject -> {
+                                    CMISUser user = null;
+                                    try {
+                                        user = userService.loadUserForConfirm(applicationObject.getPropertyValue("jconon_application:user"));
+                                    } catch (CoolUserFactoryException _ex) {
+                                        LOGGER.error("USER {} not found", userId, _ex);
+                                        user = new CMISUser(applicationObject.getPropertyValue("jconon_application:user"));
+                                    }
+                                    LOGGER.info("XLS application index {}", index);
+                                    getRecordCSV(session, applicationObject.getFolderParent(), applicationObject, user, contexURL, sheet, index[0]++);
+                                });
                     }
                 } else if (type.equalsIgnoreCase("call")) {
                     wb = createHSSFWorkbook(headCSVCall, "Bandi");
@@ -1982,14 +2128,19 @@ public class PrintService {
                     HSSFSheet sheet = wb.getSheetAt(0);
                     int index = 1;
                     for (String callId : ids) {
-                        Criteria criteriaApplications = CriteriaFactory.createCriteria(JCONONFolderType.JCONON_APPLICATION.queryName());
-                        criteriaApplications.addColumn(PropertyIds.OBJECT_ID);
-                        criteriaApplications.add(Restrictions.inFolder(callId));
-                        criteriaApplications.add(Restrictions.eq(JCONONPropertyIds.APPLICATION_STATO_DOMANDA.value(), ApplicationService.StatoDomanda.CONFERMATA.getValue()));
-                        criteriaApplications.add(Restrictions.isNull(JCONONPropertyIds.APPLICATION_ESCLUSIONE_RINUNCIA.value()));
-                        ItemIterable<QueryResult> applications = criteriaApplications.executeQuery(session, false, session.getDefaultContext());
-                        for (QueryResult application : applications.getPage(Integer.MAX_VALUE)) {
-                            Folder applicationObject = (Folder) session.getObject(application.<String>getPropertyValueById(PropertyIds.OBJECT_ID));
+                        Folder call = Optional.ofNullable(session.getObject(callId))
+                                .filter(Folder.class::isInstance)
+                                .map(Folder.class::cast)
+                                .orElseThrow(() -> new RuntimeException("Cannot find call"));
+                        List<Folder> applications = StreamSupport.stream(call.getChildren().spliterator(), false)
+                                .filter(cmisObject -> cmisObject.getType().getId().equals(JCONONFolderType.JCONON_APPLICATION.value()))
+                                .filter(cmisObject -> cmisObject.getPropertyValue(
+                                        JCONONPropertyIds.APPLICATION_STATO_DOMANDA.value()).equals(ApplicationService.StatoDomanda.CONFERMATA.getValue()))
+                                .filter(cmisObject -> cmisObject.<String>getPropertyValue(JCONONPropertyIds.APPLICATION_ESCLUSIONE_RINUNCIA.value()) == null)
+                                .filter(Folder.class::isInstance)
+                                .map(Folder.class::cast)
+                                .collect(Collectors.toList());
+                        for (Folder applicationObject : applications) {
                             CMISUser user = null;
                             try {
                                 user = userService.loadUserForConfirm(applicationObject.getPropertyValue("jconon_application:user"));
@@ -2031,23 +2182,24 @@ public class PrintService {
                                         .map(propertyDefinition -> propertyDefinition.getDisplayName()))
                                         .collect(Collectors.toList())
                         );
-                        int index = 1;
-                        Criteria criteriaApplications = CriteriaFactory.createCriteria(JCONONFolderType.JCONON_APPLICATION.queryName());
-                        criteriaApplications.addColumn(PropertyIds.OBJECT_ID);
-                        criteriaApplications.add(Restrictions.inFolder(callId));
-                        criteriaApplications.add(Restrictions.eq(JCONONPropertyIds.APPLICATION_STATO_DOMANDA.value(), ApplicationService.StatoDomanda.CONFERMATA.getValue()));
-                        ItemIterable<QueryResult> applications = criteriaApplications.executeQuery(session, false, session.getDefaultContext());
-                        for (QueryResult application : applications.getPage(Integer.MAX_VALUE)) {
-                            Folder applicationObject = (Folder) session.getObject(application.<String>getPropertyValueById(PropertyIds.OBJECT_ID));
-                            CMISUser user = null;
-                            try {
-                                user = userService.loadUserForConfirm(applicationObject.getPropertyValue("jconon_application:user"));
-                            } catch (CoolUserFactoryException _ex) {
-                                LOGGER.error("USER {} not found", userId, _ex);
-                                user = new CMISUser(applicationObject.getPropertyValue("jconon_application:user"));
-                            }
-                            getRecordCSVIstruttoria(session, callObject, applicationObject, user, contexURL, sheet, headPropertyDefinition, index++);
-                        }
+                        final int[] index = {1};
+                        StreamSupport.stream(callObject.getChildren().spliterator(), false)
+                                .filter(cmisObject -> cmisObject.getType().getId().equals(JCONONFolderType.JCONON_APPLICATION.value()))
+                                .filter(cmisObject -> cmisObject.getPropertyValue(
+                                        JCONONPropertyIds.APPLICATION_STATO_DOMANDA.value()).equals(ApplicationService.StatoDomanda.CONFERMATA.getValue()))
+                                .filter(Folder.class::isInstance)
+                                .map(Folder.class::cast)
+                                .forEach(applicationObject -> {
+                                    CMISUser user = null;
+                                    try {
+                                        user = userService.loadUserForConfirm(applicationObject.getPropertyValue("jconon_application:user"));
+                                    } catch (CoolUserFactoryException _ex) {
+                                        LOGGER.error("USER {} not found", userId, _ex);
+                                        user = new CMISUser(applicationObject.getPropertyValue("jconon_application:user"));
+                                    }
+                                    LOGGER.info("XLS Istruttoria index {}", index[0]);
+                                    getRecordCSVIstruttoria(session, callObject, applicationObject, user, contexURL, sheet, headPropertyDefinition, index[0]++);
+                                });
                     }
                 }
             } else if (queryType.equalsIgnoreCase("application")) {
@@ -2136,6 +2288,7 @@ public class PrintService {
                                 LOGGER.error("USER {} not found", userId, _ex);
                                 user = new CMISUser(applicationObject.getPropertyValue("jconon_application:user"));
                             }
+                            LOGGER.info("XLS Istruttoria index {}", index);
                             getRecordCSVIstruttoria(session, callObject, applicationObject, user, contexURL, sheet, headPropertyDefinition, index++);
                         }
                     }
@@ -2249,19 +2402,111 @@ public class PrintService {
                 map -> dateFormat.format(((Calendar) map).getTime())).orElse(""));
         row.createCell(column++).setCellValue(Optional.ofNullable(callObject.getPropertyValue(JCONONPropertyIds.CALL_DATA_FINE_INVIO_DOMANDE.value())).map(
                 map -> dateFormat.format(((Calendar) map).getTime())).orElse(""));
-        row.createCell(column++).setCellValue(user.getFullName());
-        row.createCell(column++).setCellValue(user.getEmail());
+
+        final List<CMISAuthority> users = groupService.children(
+                callObject.<String>getPropertyValue(JCONONPropertyIds.CALL_RDP.value()),
+                cmisService.getAdminSession()
+        ).stream().collect(Collectors.toList());
+
+        row.createCell(column++).setCellValue(
+                Optional.ofNullable(users)
+                        .filter(strings -> !strings.isEmpty())
+                        .orElse(Collections.emptyList())
+                        .stream()
+                        .map(CMISAuthority::getFullName)
+                        .collect(Collectors.joining(","))
+        );
+
+        row.createCell(column++).setCellValue(
+                Optional.ofNullable(users)
+                        .filter(strings -> !strings.isEmpty())
+                        .orElse(Collections.emptyList())
+                        .stream()
+                        .map(CMISAuthority::getShortName)
+                        .map(s -> userService.loadUserForConfirm(s).getEmail())
+                        .collect(Collectors.joining(","))
+        );
+
         row.createCell(column++).setCellValue(
                 Optional.ofNullable(callObject.<BigInteger>getPropertyValue(JCONONPropertyIds.CALL_NUMERO_POSTI.value()))
-                    .map(BigInteger::toString)
-                    .orElse("")
+                        .map(BigInteger::toString)
+                        .orElse("")
         );
         row.createCell(column++).setCellValue(
                 Optional.ofNullable(callObject.<String>getPropertyValue(JCONONPropertyIds.CALL_PROFILO.value()))
-                    .orElse("")
+                        .orElse("")
         );
+        final Map<JCONONDocumentType, Pair<String, String>> protocollo = getProtocollo(session, callObject);
+        final Pair<String, String> protocolloBando = protocollo.getOrDefault(JCONONDocumentType.JCONON_ATTACHMENT_CALL_IT, new Pair<String, String>("", ""));
+        row.createCell(column++).setCellValue(protocolloBando.getFirst());
+        row.createCell(column++).setCellValue(protocolloBando.getSecond());
+        final Pair<String, String> protocolloCommissione = protocollo.getOrDefault(JCONONDocumentType.JCONON_ATTACHMENT_CALL_COMMISSION, new Pair<String, String>("", ""));
+        row.createCell(column++).setCellValue(protocolloCommissione.getFirst());
+        row.createCell(column++).setCellValue(protocolloCommissione.getSecond());
+        final Pair<String, String> protocolloModificaCommissione = protocollo.getOrDefault(JCONONDocumentType.JCONON_ATTACHMENT_CALL_COMMISSION_MODIFICATION, new Pair<String, String>("", ""));
+        row.createCell(column++).setCellValue(protocolloModificaCommissione.getFirst());
+        row.createCell(column++).setCellValue(protocolloModificaCommissione.getSecond());
+        final Pair<String, String> protocolloNominaSegretario = protocollo.getOrDefault(JCONONDocumentType.JCONON_ATTACHMENT_CALL_NOMINA_SEGRETARIO, new Pair<String, String>("", ""));
+        row.createCell(column++).setCellValue(protocolloNominaSegretario.getFirst());
+        row.createCell(column++).setCellValue(protocolloNominaSegretario.getSecond());
     }
 
+    private Map<JCONONDocumentType, Pair<String, String>> getProtocollo(Session session, Folder callObject) {
+        Map<JCONONDocumentType, Pair<String, String>> result = new HashMap<>();
+        Optional.ofNullable(findAttachmentId(session, callObject, JCONONDocumentType.JCONON_ATTACHMENT_CALL_IT, true))
+                .map(s -> session.getObject(s))
+                .ifPresent(cmisObject -> {
+                    result.put(JCONONDocumentType.JCONON_ATTACHMENT_CALL_IT,
+                            new Pair<>(
+                                    cmisObject.<String>getPropertyValue(JCONONPropertyIds.PROTOCOLLO_NUMERO.value()),
+                                    Optional.ofNullable(cmisObject.<Calendar>getPropertyValue(JCONONPropertyIds.PROTOCOLLO_DATA.value()))
+                                            .map(Calendar::getTime)
+                                            .map(date -> dateFormat.format(date))
+                                            .orElse("")
+                            )
+                    );
+                });
+        Optional.ofNullable(findAttachmentId(session, callObject, JCONONDocumentType.JCONON_ATTACHMENT_CALL_COMMISSION, true))
+                .map(s -> session.getObject(s))
+                .ifPresent(cmisObject -> {
+                    result.put(JCONONDocumentType.JCONON_ATTACHMENT_CALL_COMMISSION,
+                            new Pair<>(
+                                    cmisObject.<String>getPropertyValue(JCONONPropertyIds.PROTOCOLLO_NUMERO.value()),
+                                    Optional.ofNullable(cmisObject.<Calendar>getPropertyValue(JCONONPropertyIds.PROTOCOLLO_DATA.value()))
+                                            .map(Calendar::getTime)
+                                            .map(date -> dateFormat.format(date))
+                                            .orElse("")
+                            )
+                    );
+                });
+        Optional.ofNullable(findAttachmentId(session, callObject, JCONONDocumentType.JCONON_ATTACHMENT_CALL_COMMISSION_MODIFICATION, true))
+                .map(s -> session.getObject(s))
+                .ifPresent(cmisObject -> {
+                    result.put(JCONONDocumentType.JCONON_ATTACHMENT_CALL_COMMISSION_MODIFICATION,
+                            new Pair<>(
+                                    cmisObject.<String>getPropertyValue(JCONONPropertyIds.PROTOCOLLO_NUMERO.value()),
+                                    Optional.ofNullable(cmisObject.<Calendar>getPropertyValue(JCONONPropertyIds.PROTOCOLLO_DATA.value()))
+                                            .map(Calendar::getTime)
+                                            .map(date -> dateFormat.format(date))
+                                            .orElse("")
+                            )
+                    );
+                });
+        Optional.ofNullable(findAttachmentId(session, callObject, JCONONDocumentType.JCONON_ATTACHMENT_CALL_NOMINA_SEGRETARIO, true))
+                .map(s -> session.getObject(s))
+                .ifPresent(cmisObject -> {
+                    result.put(JCONONDocumentType.JCONON_ATTACHMENT_CALL_NOMINA_SEGRETARIO,
+                            new Pair<>(
+                                    cmisObject.<String>getPropertyValue(JCONONPropertyIds.PROTOCOLLO_NUMERO.value()),
+                                    Optional.ofNullable(cmisObject.<Calendar>getPropertyValue(JCONONPropertyIds.PROTOCOLLO_DATA.value()))
+                                            .map(Calendar::getTime)
+                                            .map(date -> dateFormat.format(date))
+                                            .orElse("")
+                            )
+                    );
+                });
+        return result;
+    }
     private void getRecordCSVPunteggi(Session session, Folder callObject, Folder applicationObject, CMISUser user, String contexURL, HSSFSheet sheet, int index) {
         int column = 0;
         HSSFRow row = sheet.createRow(index);
